@@ -59,6 +59,7 @@
 #include <thrust/iterator/transform_iterator.h>
 #include <thrust/scan.h>
 
+#include <cstdlib>
 #include <memory>
 #include <variant>
 
@@ -67,10 +68,28 @@ using namespace cuvs::spatial::knn::detail;  // NOLINT
 
 using internal_extents_t = int64_t;  // The default mdspan extent type used internally.
 
+// PROTOTYPE (method C): when CUVS_IVF_PQ_COSINE_KMEANS_L2=1, a cosine index clusters with plain
+// Euclidean k-means on L2-normalised vectors (same data ranking as cosine; mean centroids are kept
+// as is, no centroid re-normalisation). The index metric itself stays CosineExpanded.
+inline bool cosine_kmeans_as_l2() noexcept
+{
+  static const bool v = [] {
+    const char* e = std::getenv("CUVS_IVF_PQ_COSINE_KMEANS_L2");
+    return e != nullptr && e[0] == '1';
+  }();
+  return v;
+}
+
+// True when the coarse clustering of an index with this metric runs as L2 on normalised data.
+inline bool cosine_clustering_as_l2(cuvs::distance::DistanceType metric) noexcept
+{
+  return metric == cuvs::distance::DistanceType::CosineExpanded && cosine_kmeans_as_l2();
+}
+
 inline cuvs::distance::DistanceType coarse_clustering_metric(
   cuvs::distance::DistanceType metric) noexcept
 {
-  return metric == cuvs::distance::DistanceType::InnerProduct
+  return (metric == cuvs::distance::DistanceType::InnerProduct || cosine_clustering_as_l2(metric))
            ? cuvs::distance::DistanceType::L2Expanded
            : metric;
 }
@@ -1137,8 +1156,27 @@ void extend(raft::resources const& handle,
         cluster_centers.data(), n_clusters, index->dim());
       cuvs::cluster::kmeans::balanced_params kmeans_params;
       kmeans_params.metric = coarse_clustering_metric(index->metric());
-      cuvs::cluster::kmeans::predict(
-        handle, kmeans_params, batch_data_view, centers_view, batch_labels_view);
+      if (cosine_clustering_as_l2(index->metric())) {
+        rmm::device_uvector<float> normed(
+          size_t(batch.size()) * index->dim(), stream, device_memory);
+        auto normed_view = raft::make_device_matrix_view<float, internal_extents_t>(
+          normed.data(), batch.size(), index->dim());
+        raft::linalg::map(handle,
+                          raft::make_device_vector_view<float, size_t>(normed.data(), normed.size()),
+                          raft::cast_op<float>{},
+                          raft::make_device_vector_view<const T, size_t>(
+                            batch.data(), size_t(batch.size()) * index->dim()));
+        raft::linalg::row_normalize<raft::linalg::L2Norm>(
+          handle, raft::make_const_mdspan(normed_view), normed_view);
+        cuvs::cluster::kmeans::predict(handle,
+                                       kmeans_params,
+                                       raft::make_const_mdspan(normed_view),
+                                       centers_view,
+                                       batch_labels_view);
+      } else {
+        cuvs::cluster::kmeans::predict(
+          handle, kmeans_params, batch_data_view, centers_view, batch_labels_view);
+      }
       vec_batches.prefetch_next_batch();
       // User needs to make sure kernel finishes its work before we overwrite batch in the next
       // iteration if different streams are used for kernel and copy.
@@ -1359,7 +1397,8 @@ auto build(raft::resources const& handle,
     rmm::device_uvector<uint32_t> labels(n_rows_train, stream, big_memory_resource);
     auto centers_const_view = raft::make_device_matrix_view<const float, internal_extents_t>(
       cluster_centers, impl->n_lists(), impl->dim());
-    if (impl->metric() == distance::DistanceType::CosineExpanded) {
+    if (impl->metric() == distance::DistanceType::CosineExpanded &&
+        !cosine_clustering_as_l2(impl->metric())) {
       raft::linalg::row_normalize<raft::linalg::L2Norm>(handle, centers_const_view, centers_view);
     }
     auto labels_view =

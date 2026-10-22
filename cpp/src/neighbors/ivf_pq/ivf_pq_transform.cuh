@@ -57,8 +57,28 @@ void transform_batch(raft::resources const& res,
   cuvs::cluster::kmeans::balanced_params kmeans_params;
   kmeans_params.metric = coarse_clustering_metric(index.metric());
 
-  cuvs::cluster::kmeans_balanced::predict(
-    res, kmeans_params, dataset, cluster_centers, output_labels, utils::mapping<float>{});
+  if (cosine_clustering_as_l2(index.metric())) {
+    // Method C: normalise the batch, then assign with plain L2 against mean centroids.
+    const auto dim = static_cast<IdxT>(dataset.extent(1));
+    auto normed    = raft::make_device_mdarray<float>(res, mr, raft::make_extents<IdxT>(n_rows, dim));
+    raft::linalg::map(res,
+                      raft::make_device_vector_view<float, size_t>(normed.data_handle(),
+                                                                   size_t(n_rows) * dim),
+                      raft::cast_op<float>{},
+                      raft::make_device_vector_view<const T, size_t>(dataset.data_handle(),
+                                                                     size_t(n_rows) * dim));
+    raft::linalg::row_normalize<raft::linalg::L2Norm>(
+      res, raft::make_const_mdspan(normed.view()), normed.view());
+    cuvs::cluster::kmeans_balanced::predict(res,
+                                            kmeans_params,
+                                            raft::make_const_mdspan(normed.view()),
+                                            cluster_centers,
+                                            output_labels,
+                                            utils::mapping<float>{});
+  } else {
+    cuvs::cluster::kmeans_balanced::predict(
+      res, kmeans_params, dataset, cluster_centers, output_labels, utils::mapping<float>{});
+  }
 
   // Compute the residuals for each vector in the dataset
   auto dataset_residuals =
