@@ -314,7 +314,31 @@ CUVS_EXPORT cuvsError_t cuvsRMMAsyncMemoryResourceEnable();
 CUVS_EXPORT cuvsError_t cuvsRMMMemoryResourceReset();
 
 /**
- * @brief Allocates pinned memory on the host using RMM
+ * @brief Makes cuvsRMMHostAlloc / cuvsRMMHostFree draw from a process-wide pool of pinned host
+ * memory (an RMM pool_memory_resource over pinned_host_memory_resource).
+ *
+ * The pool is allocated once, here, with initial size equal to maximum size, so no later call
+ * pays for a cudaHostAlloc. When the pool cannot satisfy a request, cuvsRMMHostAlloc returns an
+ * error (it never falls back to unpooled memory), and the caller decides what to do.
+ *
+ * Call this before the first cuvsRMMHostAlloc and call cuvsRMMPinnedHostPoolDisable only after
+ * every allocation has been freed. Allocations may be freed from any thread.
+ *
+ * @param[in] pool_size_bytes Size of the pool in bytes
+ * @return cuvsError_t
+ */
+CUVS_EXPORT cuvsError_t cuvsRMMPinnedHostPoolEnable(size_t pool_size_bytes);
+
+/**
+ * @brief Releases the pinned host pool created by cuvsRMMPinnedHostPoolEnable. Afterwards
+ * cuvsRMMHostAlloc / cuvsRMMHostFree allocate directly again (one cudaHostAlloc per call).
+ * @return cuvsError_t
+ */
+CUVS_EXPORT cuvsError_t cuvsRMMPinnedHostPoolDisable();
+
+/**
+ * @brief Allocates pinned memory on the host using RMM. Uses the pool if
+ * cuvsRMMPinnedHostPoolEnable was called, otherwise one cudaHostAlloc per call.
  * @param[out] ptr Pointer to allocated host memory
  * @param[in] bytes Size in bytes to allocate
  * @return cuvsError_t
@@ -322,9 +346,9 @@ CUVS_EXPORT cuvsError_t cuvsRMMMemoryResourceReset();
 CUVS_EXPORT cuvsError_t cuvsRMMHostAlloc(void** ptr, size_t bytes);
 
 /**
- * @brief Deallocates pinned memory on the host using RMM
+ * @brief Deallocates pinned memory on the host using RMM. May be called from any thread.
  * @param[in] ptr Pointer to allocated host memory to free
- * @param[in] bytes Size in bytes to deallocate
+ * @param[in] bytes Size in bytes to deallocate (must equal the size passed to cuvsRMMHostAlloc)
  * @return cuvsError_t
  */
 CUVS_EXPORT cuvsError_t cuvsRMMHostFree(void* ptr, size_t bytes);

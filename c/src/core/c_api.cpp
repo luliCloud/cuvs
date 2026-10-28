@@ -347,19 +347,60 @@ extern "C" cuvsError_t cuvsRMMMemoryResourceReset()
   });
 }
 
-thread_local std::unique_ptr<rmm::mr::pinned_host_memory_resource> pinned_mr;
+namespace {
+// Process-wide, so memory can be allocated and freed from different threads.
+std::mutex pinned_host_mutex;
+std::shared_ptr<rmm::mr::pool_memory_resource> pinned_host_pool;  // null: unpooled
+}  // namespace
+
+extern "C" cuvsError_t cuvsRMMPinnedHostPoolEnable(size_t pool_size_bytes)
+{
+  return cuvs::core::translate_exceptions([=] {
+    auto pool = std::make_shared<rmm::mr::pool_memory_resource>(
+      rmm::mr::pinned_host_memory_resource{}, pool_size_bytes, pool_size_bytes);
+    std::lock_guard<std::mutex> lock(pinned_host_mutex);
+    pinned_host_pool = std::move(pool);
+  });
+}
+
+extern "C" cuvsError_t cuvsRMMPinnedHostPoolDisable()
+{
+  return cuvs::core::translate_exceptions([=] {
+    std::lock_guard<std::mutex> lock(pinned_host_mutex);
+    pinned_host_pool.reset();
+  });
+}
 
 extern "C" cuvsError_t cuvsRMMHostAlloc(void** ptr, size_t bytes)
 {
   return cuvs::core::translate_exceptions([=] {
-    if (pinned_mr == nullptr) { pinned_mr = std::make_unique<rmm::mr::pinned_host_memory_resource>(); }
-    *ptr = pinned_mr->allocate_sync(bytes);
+    std::shared_ptr<rmm::mr::pool_memory_resource> pool;
+    {
+      std::lock_guard<std::mutex> lock(pinned_host_mutex);
+      pool = pinned_host_pool;
+    }
+    if (pool) {
+      *ptr = pool->allocate_sync(bytes);
+    } else {
+      *ptr = rmm::mr::pinned_host_memory_resource{}.allocate_sync(bytes);
+    }
   });
 }
 
 extern "C" cuvsError_t cuvsRMMHostFree(void* ptr, size_t bytes)
 {
-  return cuvs::core::translate_exceptions([=] { pinned_mr->deallocate_sync(ptr, bytes); });
+  return cuvs::core::translate_exceptions([=] {
+    std::shared_ptr<rmm::mr::pool_memory_resource> pool;
+    {
+      std::lock_guard<std::mutex> lock(pinned_host_mutex);
+      pool = pinned_host_pool;
+    }
+    if (pool) {
+      pool->deallocate_sync(ptr, bytes);
+    } else {
+      rmm::mr::pinned_host_memory_resource{}.deallocate_sync(ptr, bytes);
+    }
+  });
 }
 
 thread_local std::string last_error_text = "";
