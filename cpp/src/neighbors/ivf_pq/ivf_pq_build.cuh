@@ -1157,6 +1157,7 @@ void extend(raft::resources const& handle,
       cuvs::cluster::kmeans::balanced_params kmeans_params;
       kmeans_params.metric = coarse_clustering_metric(index->metric());
       if (cosine_clustering_as_l2(index->metric())) {
+        raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> c_scope("ivf_pq::extend::cosine_kmeans_as_l2(batch = %zu)", size_t(batch.size()));
         rmm::device_uvector<float> normed(
           size_t(batch.size()) * index->dim(), stream, device_memory);
         auto normed_view = raft::make_device_matrix_view<float, internal_extents_t>(
@@ -1397,6 +1398,10 @@ auto build(raft::resources const& handle,
     rmm::device_uvector<uint32_t> labels(n_rows_train, stream, big_memory_resource);
     auto centers_const_view = raft::make_device_matrix_view<const float, internal_extents_t>(
       cluster_centers, impl->n_lists(), impl->dim());
+    if (cosine_clustering_as_l2(impl->metric())) {
+      // marker only: mean centroids are kept, no re-normalisation (method C)
+      raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> c_scope("ivf_pq::build::cosine_kmeans_as_l2(centroid normalisation skipped)");
+    }
     if (impl->metric() == distance::DistanceType::CosineExpanded &&
         !cosine_clustering_as_l2(impl->metric())) {
       raft::linalg::row_normalize<raft::linalg::L2Norm>(handle, centers_const_view, centers_view);

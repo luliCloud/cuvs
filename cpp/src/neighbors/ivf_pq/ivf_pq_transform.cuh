@@ -59,6 +59,7 @@ void transform_batch(raft::resources const& res,
 
   if (cosine_clustering_as_l2(index.metric())) {
     // Method C: normalise the batch, then assign with plain L2 against mean centroids.
+    raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> c_scope("ivf_pq::transform::cosine_kmeans_as_l2(n_rows = %zu)", size_t(n_rows));
     const auto dim = static_cast<IdxT>(dataset.extent(1));
     auto normed    = raft::make_device_mdarray<float>(res, mr, raft::make_extents<IdxT>(n_rows, dim));
     raft::linalg::map(res,
