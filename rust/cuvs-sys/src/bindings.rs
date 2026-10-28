@@ -231,6 +231,14 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     #[must_use]
+    pub fn cuvsRMMPinnedHostPoolEnable(pool_size_bytes: usize) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    pub fn cuvsRMMPinnedHostPoolDisable() -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
     pub fn cuvsRMMHostAlloc(ptr: *mut *mut ::std::os::raw::c_void, bytes: usize) -> cuvsError_t;
 }
 unsafe extern "C" {
