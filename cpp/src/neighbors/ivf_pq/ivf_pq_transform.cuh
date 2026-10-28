@@ -57,22 +57,25 @@ void transform_batch(raft::resources const& res,
   cuvs::cluster::kmeans::balanced_params kmeans_params;
   kmeans_params.metric = coarse_clustering_metric(index.metric());
 
-  if (cosine_clustering_as_l2(index.metric())) {
-    // Method C: normalise the batch, then assign with plain L2 against mean centroids.
+  // Method C: normalise the batch once; the same unit-length copy feeds both the L2 assignment and
+  // the residuals (flat_compute_residuals would otherwise normalise the batch a second time).
+  const bool normalise_once = cosine_clustering_as_l2(index.metric());
+  rmm::device_uvector<float> normed(0, raft::resource::get_cuda_stream(res), mr);
+  if (normalise_once) {
     raft::common::nvtx::range<cuvs::common::nvtx::domain::cuvs> c_scope("ivf_pq::transform::cosine_kmeans_as_l2(n_rows = %zu)", size_t(n_rows));
     const auto dim = static_cast<IdxT>(dataset.extent(1));
-    auto normed    = raft::make_device_mdarray<float>(res, mr, raft::make_extents<IdxT>(n_rows, dim));
+    normed.resize(size_t(n_rows) * dim, raft::resource::get_cuda_stream(res));
+    auto normed_view = raft::make_device_matrix_view<float, IdxT>(normed.data(), n_rows, dim);
     raft::linalg::map(res,
-                      raft::make_device_vector_view<float, size_t>(normed.data_handle(),
-                                                                   size_t(n_rows) * dim),
+                      raft::make_device_vector_view<float, size_t>(normed.data(), normed.size()),
                       raft::cast_op<float>{},
                       raft::make_device_vector_view<const T, size_t>(dataset.data_handle(),
                                                                      size_t(n_rows) * dim));
     raft::linalg::row_normalize<raft::linalg::L2Norm>(
-      res, raft::make_const_mdspan(normed.view()), normed.view());
+      res, raft::make_const_mdspan(normed_view), normed_view);
     cuvs::cluster::kmeans_balanced::predict(res,
                                             kmeans_params,
-                                            raft::make_const_mdspan(normed.view()),
+                                            raft::make_const_mdspan(normed_view),
                                             cluster_centers,
                                             output_labels,
                                             utils::mapping<float>{});
@@ -85,15 +88,29 @@ void transform_batch(raft::resources const& res,
   auto dataset_residuals =
     raft::make_device_mdarray<float>(res, mr, raft::make_extents<IdxT>(n_rows, index.rot_dim()));
 
-  flat_compute_residuals<T, IdxT>(res,
-                                  dataset_residuals.data_handle(),
-                                  n_rows,
-                                  index.rotation_matrix(),
-                                  index.centers(),
-                                  dataset.data_handle(),
-                                  output_labels.data_handle(),
-                                  mr,
-                                  index.metric());
+  if (normalise_once) {
+    // `normed` is already unit length; L2Expanded makes flat_compute_residuals skip its own
+    // normalisation (the metric is only used there to decide that).
+    flat_compute_residuals<float, IdxT>(res,
+                                        dataset_residuals.data_handle(),
+                                        n_rows,
+                                        index.rotation_matrix(),
+                                        index.centers(),
+                                        normed.data(),
+                                        output_labels.data_handle(),
+                                        mr,
+                                        cuvs::distance::DistanceType::L2Expanded);
+  } else {
+    flat_compute_residuals<T, IdxT>(res,
+                                    dataset_residuals.data_handle(),
+                                    n_rows,
+                                    index.rotation_matrix(),
+                                    index.centers(),
+                                    dataset.data_handle(),
+                                    output_labels.data_handle(),
+                                    mr,
+                                    index.metric());
+  }
 
   // Launch kernel to transform the code output
   constexpr uint32_t kBlockSize  = 256;
