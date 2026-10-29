@@ -45,7 +45,26 @@
 
 #include <optional>
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace cuvs::neighbors::ivf_pq::detail {
+
+// EXPERIMENT (not for merge): with CUVS_IVF_PQ_COSINE_SEARCH_L2=1 a cosine index (stock unit-length
+// centroids, or method C mean centroids; data and queries assumed unit length) is scored with the L2
+// path instead of inner product, to mimic a client that reads the index as L2 (e.g. Lance).
+inline auto search_metric(cuvs::distance::DistanceType m) -> cuvs::distance::DistanceType
+{
+  static const bool as_l2 = [] {
+    const char* e = std::getenv("CUVS_IVF_PQ_COSINE_SEARCH_L2");
+    const bool on = e != nullptr && e[0] == '1';
+    if (on) std::fprintf(stderr, "ivf_pq::search: CUVS_IVF_PQ_COSINE_SEARCH_L2 active, cosine index scored as L2\n");
+    return on;
+  }();
+  return (as_l2 && m == cuvs::distance::DistanceType::CosineExpanded)
+           ? cuvs::distance::DistanceType::L2Expanded
+           : m;
+}
 
 using namespace cuvs::spatial::knn::detail;  // NOLINT
 
@@ -533,7 +552,7 @@ void ivfpq_search_worker(raft::resources const& handle,
                                                            uint32_t n_probes,
                                                            uint32_t topk) = nullptr;
   uint32_t precomp_data_count                                             = 0;
-  switch (index.metric()) {
+  switch (search_metric(index.metric())) {
     case distance::DistanceType::L2SqrtExpanded:
     case distance::DistanceType::L2Expanded: {
       // stores basediff (query[i] - center[i])
@@ -657,11 +676,11 @@ void ivfpq_search_worker(raft::resources const& handle,
   ivf::detail::postprocess_distances(handle,
                                      distances,
                                      topk_dists.data(),
-                                     index.metric(),
+                                     search_metric(index.metric()),
                                      n_queries,
                                      topK,
                                      scaling_factor,
-                                     index.metric() != distance::DistanceType::CosineExpanded);
+                                     search_metric(index.metric()) != distance::DistanceType::CosineExpanded);
   ivf::detail::postprocess_neighbors(neighbors,
                                      neighbors_uint32,
                                      index.inds_ptrs().data_handle(),
@@ -966,7 +985,7 @@ inline void search(raft::resources const& handle,
   rmm::device_uvector<float> rot_queries(max_bs_outer * index.rot_dim(), stream, mr);
   rmm::device_uvector<uint32_t> clusters_to_probe(max_bs_outer * n_probes, stream, mr);
 
-  auto search_instance = ivfpq_search<IdxT, IvfSampleFilterT>::fun(params, index.metric());
+  auto search_instance = ivfpq_search<IdxT, IvfSampleFilterT>::fun(params, search_metric(index.metric()));
 
   for (uint32_t offset_q = 0; offset_q < n_queries; offset_q += max_bs_outer) {
     uint32_t queries_batch = min(max_bs_outer, n_queries - offset_q);
@@ -985,7 +1004,7 @@ inline void search(raft::resources const& handle,
                                index.n_lists(),
                                dim,
                                dim_ext,
-                               index.metric(),
+                               search_metric(index.metric()),
                                queries + static_cast<size_t>(dim) * offset_q,
                                get_centers<value_type, IdxT>(handle, index).data_handle(),
                                mr);
@@ -1016,7 +1035,7 @@ inline void search(raft::resources const& handle,
                            stream.get());
       },
       gemm_queries);
-    if (index.metric() == distance::DistanceType::CosineExpanded) {
+    if (search_metric(index.metric()) == distance::DistanceType::CosineExpanded) {
       auto rot_queries_view = raft::make_device_matrix_view<float, uint32_t>(
         rot_queries.data(), max_bs_outer, index.rot_dim());
       raft::linalg::row_normalize<raft::linalg::L2Norm>(
