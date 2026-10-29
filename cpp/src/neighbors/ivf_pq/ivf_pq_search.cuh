@@ -53,7 +53,7 @@ namespace cuvs::neighbors::ivf_pq::detail {
 // EXPERIMENT (not for merge): with CUVS_IVF_PQ_COSINE_SEARCH_L2=1 a cosine index (stock unit-length
 // centroids, or method C mean centroids; data and queries assumed unit length) is scored with the L2
 // path instead of inner product, to mimic a client that reads the index as L2 (e.g. Lance).
-inline auto search_metric(cuvs::distance::DistanceType m) -> cuvs::distance::DistanceType
+inline auto cosine_search_as_l2(cuvs::distance::DistanceType m) -> bool
 {
   static const bool as_l2 = [] {
     const char* e = std::getenv("CUVS_IVF_PQ_COSINE_SEARCH_L2");
@@ -61,9 +61,12 @@ inline auto search_metric(cuvs::distance::DistanceType m) -> cuvs::distance::Dis
     if (on) std::fprintf(stderr, "ivf_pq::search: CUVS_IVF_PQ_COSINE_SEARCH_L2 active, cosine index scored as L2\n");
     return on;
   }();
-  return (as_l2 && m == cuvs::distance::DistanceType::CosineExpanded)
-           ? cuvs::distance::DistanceType::L2Expanded
-           : m;
+  return as_l2 && m == cuvs::distance::DistanceType::CosineExpanded;
+}
+
+inline auto search_metric(cuvs::distance::DistanceType m) -> cuvs::distance::DistanceType
+{
+  return cosine_search_as_l2(m) ? cuvs::distance::DistanceType::L2Expanded : m;
 }
 
 using namespace cuvs::spatial::knn::detail;  // NOLINT
@@ -681,6 +684,11 @@ void ivfpq_search_worker(raft::resources const& handle,
                                      topK,
                                      scaling_factor,
                                      search_metric(index.metric()) != distance::DistanceType::CosineExpanded);
+  if (cosine_search_as_l2(index.metric())) {
+    // queries are unit length (normalised in search()) and so is the data: cosine distance = L2^2 / 2
+    auto dview = raft::make_device_vector_view<float, size_t>(distances, size_t(n_queries) * size_t(topK));
+    raft::linalg::map(handle, dview, raft::mul_const_op<float>{0.5f}, raft::make_const_mdspan(dview));
+  }
   ivf::detail::postprocess_neighbors(neighbors,
                                      neighbors_uint32,
                                      index.inds_ptrs().data_handle(),
@@ -1035,7 +1043,7 @@ inline void search(raft::resources const& handle,
                            stream.get());
       },
       gemm_queries);
-    if (search_metric(index.metric()) == distance::DistanceType::CosineExpanded) {
+    if (index.metric() == distance::DistanceType::CosineExpanded) {
       auto rot_queries_view = raft::make_device_matrix_view<float, uint32_t>(
         rot_queries.data(), max_bs_outer, index.rot_dim());
       raft::linalg::row_normalize<raft::linalg::L2Norm>(
